@@ -1,0 +1,257 @@
+---
+title: "Relazione Pt100"
+author: "Andrea Pasquali, 247937"
+output: pdf_document
+always_allow_html: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, include=FALSE}
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+library(modelr)
+library(knitr)
+library(plotly)
+library(latex2exp)
+library(tinytex)
+```
+
+Importo dati
+
+```{r}
+
+data <- read.table("datiPT100_2005Taratura.txt", header = F, sep = "", stringsAsFactors = FALSE)%>%
+  as.data.frame() %>% 
+  rename(
+    t = V1,
+    TF= V2,
+    TR= V3) %>%
+    mutate(across(c(t, TF, TR), ~ as.numeric(sub(",", ".", .))))
+
+  
+  
+head(data)
+
+```
+
+
+```{r}
+ggplot(data, aes(x=t, y=TF)) + 
+  geom_line()
+```
+
+
+# Taratura Dinamica
+
+Modifichiamo i dati e implemento due metodi per effettuare la regeressione e ricavare il parametro di interesse tau
+
+```{r}
+Temp<- data %>% 
+  select(t, TF) %>% 
+  mutate(t = t - 180) %>%
+  dplyr::filter(t>0) 
+#Temp
+```
+
+## Primo metodo, regressione non lineare
+
+il modello da implementare è il seguente:
+
+$$
+T(t) = (T_i - T_f)\, e^{-t/\tau} + T_f
+$$
+
+
+```{r}
+
+Temp.nls <- nls( TF ~(Ti - Tf)*exp(-t/tau) + Tf, 
+    data = Temp, 
+    start = list(
+      Ti=30,
+      Tf=100,
+      tau=20
+    ))
+
+summary(Temp.nls)
+
+plot(residuals(Temp.nls))
+```
+
+```{r}
+Temp %>% 
+  add_predictions(Temp.nls, var="modello") %>% 
+  ggplot(aes(x=t, y=TF)) + 
+  geom_line() +
+  geom_line(aes(y=modello), color="red",linewidth=1) +
+  labs(x="Tempo", y="Temperatura")
+```
+
+## Secondo metodo, linearizzazione
+
+il modello usato precedentemente può essere linearizzato nel modo seguente:
+
+$$
+\ln\!\left(\frac{T - T_f}{T_i - T_f}\right) = -\frac{t}{\tau}
+$$
+
+coefficente angolare -1/tau, da tenere a mente per ricavare il parametro
+```{r}
+#approssimate dalla regressione precedente
+Ti <- 30 
+Tf <- 82
+
+Temp <- Temp %>% mutate(Log.lin = log((TF-Tf)/(Ti - Tf))) %>% 
+  dplyr::filter(!is.infinite(Log.lin)) %>%
+  dplyr::filter(!is.nan(Log.lin))%>% 
+  dplyr::filter(t > 0 & t < 50)
+
+```
+
+```{r}
+Temp.lm  <-  lm(data=Temp, Log.lin ~ t -1 ) 
+summary(Temp.lm)
+
+```
+
+```{r}
+tau <- round(-1/Temp.lm$coefficients, 4)
+tau
+
+#plot(residuals(Temp.lm))
+```
+
+```{r}
+Temp %>% 
+  ggplot(aes(x=t, y=Log.lin)) +
+  #geom_smooth(method="lm", formula = y~ x -1 ) +
+  geom_line(aes(y=Temp.lm$coefficients*t), color="red",linewidth=1)+
+  geom_point(size=0.5)+
+  labs(x="Tempo", y="Temperatura")
+  
+```
+
+Come si può notare con entrambi i metodi il valore di tau ottenuto è molto simile
+
+# Compensazione Dinamica
+
+l'uscita dello strumento viene moltiplicata nel dominio delle frequenze per la Funzione di Trasferimento inversa per stimare quella che è l'entrata, nel fare questo procedimento bisogna prestare particolare attenzione al rumore poiche la fdtI tende ad amplificare le alte frequenze risulatando in una stima errata
+
+fdt caratteristica pt100:
+$$
+H(j\omega) = \frac{1}{1 +  j\omega \tau}
+$$
+fdtI:
+$$
+H^{-1}(j\omega) = 1 + j\omega \tau
+$$
+Per prima cosa importo i dati
+
+```{r}
+Comp <- read.table("datiPT100_2005Cicli.txt", header = F, sep = "", stringsAsFactors = FALSE)%>%
+  as.data.frame()%>%
+    rename(
+    t = V1,
+    Rumore= V2,
+    Filtrato= V3) %>%
+    mutate(across(c(t, Rumore, Filtrato), ~ as.numeric(sub(",", ".", .))))
+           
+head(Comp)
+
+```
+
+
+```{r}
+N <- length(Comp$Filtrato)
+dt <- mean(diff(Comp$t)) # diff crea vettore con le differenze temporali tra t(i+1) e t(i) e poi viene fatta le media
+freq <- (0:(N - 1)) / (N * dt) # cioè sarebbe fk=k/Ts
+tau <- 31.21
+H_inv <- 1+1i*2*pi*freq*tau
+
+# mi assicuro che lo spettro sia simmetrico 
+H_inv[(N/2 + 2):N] <- Conj(rev(H_inv[2:(N/2)])) 
+                                                
+T.fft<- fft(Comp$Filtrato)
+
+Input.f <- (H_inv)*T.fft    
+
+Comp <- Comp %>% mutate(Input.t = fft(Input.f, inverse = TRUE)/N) #porto nel dominio di t
+
+
+```
+
+Applico il filtro
+
+```{r}
+f_cutoff <- 0.01  # Hz, ad esempio taglio a 0.05 Hz
+
+lowpass <- ifelse(freq <= f_cutoff, 1, 0.01)
+# Simmetria
+lowpass[(N/2 + 2):N] <- rev(lowpass[2:(N/2)])
+
+Input.f_filtered <- Input.f * lowpass  #applico il filtro
+
+Comp <- Comp %>% mutate(Input.t_filtered = fft(Input.f_filtered, inverse = TRUE)/N) #porto nel dominio di t
+head(Comp)
+```
+
+```{r}
+grafico <-ggplot(Comp, aes(x = t)) +
+  geom_line(aes(y = Re(Input.t), color= "Misurando F non filtrato ")) +
+  geom_line(aes(y = Filtrato, color="Uscita dello strumento"))+
+  geom_line(aes(y = Re(Input.t_filtered), color= "Misurando F filtrato "))+ 
+    labs(color = "Tipo di Linea") +
+       xlim(100, 1600) +
+       ylim(60, 110)
+#ggplotly(grafico)
+
+grafico
+```
+
+
+## Nessun filtro
+
+Per mostrare gli effetti problematici del rumore rifaccio la procedura di compensazione senza prendere alcun provvediamneto e mostro il risultato per confronto
+
+```{r}
+N <- length(Comp$Rumore)
+dt <- mean(diff(Comp$t)) # diff crea vettore con le differenze temporali tra t(i+1) e t(i) e poi viene fatta le media
+freq <- (0:(N - 1)) / (N * dt) # cioè sarebbe fk=k/Ts
+tau <- 31.21
+H_inv <- 1+1i*2*pi*freq*tau
+
+# mi assicuro che lo spettro sia simmetrico 
+H_inv[(N/2 + 2):N] <- Conj(rev(H_inv[2:(N/2)])) 
+                                                
+R.fft <- fft(Comp$Rumore)
+
+Input.R.f <- (H_inv)*R.fft    
+
+Comp <- Comp %>% mutate(Input.R.t = fft(Input.R.f, inverse = TRUE)/N) 
+
+```
+
+```{r}
+grafico <-ggplot(Comp, aes(x = t)) +
+  geom_line(aes(y = Re(Input.R.t), color= "Misurando R non filtrato")) +
+  geom_line(aes(y = Rumore, color="Uscita dello strumento R"))+
+  geom_line(aes(y = Re(Input.t_filtered), color= "Misurando R filtrato"))+ 
+    labs( color = "Tipo di Linea") 
+#ggplotly(grafico)
+
+grafico
+```
+
+Si può notare chiaramente come il misurando stimando senza filtrare il rumore sia illeggibile per via dell' amplificazione dovuta a H_inv
+
+
+
+
+
+
+
+
+

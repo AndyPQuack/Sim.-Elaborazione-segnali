@@ -1,0 +1,264 @@
+---
+title: "Inversione Armoniche"
+author: "Andrea Pasquali"
+date: "2025-08-18"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(glue)
+library(control)
+library(patchwork)
+library(knitr)
+library(gsignal)
+library(plotly)
+library(pracma)
+```
+
+```{r}
+# FUNZIONE: Bodeplot
+ggbodeplot <- function(tf, fmin=1, fmax=1e4, df=0.01) {
+  # vector of points for each order of magnitude (OOM):
+  pts <- 10^seq(0, 1, df) %>% tail(-1)
+  # vector of OOMs:
+  ooms <- 10^(floor(log10(fmin)):ceiling(log10(fmax)-1))
+  # combine pts and ooms:
+  freqs <- as.vector(pts %o% ooms)
+  # warning: bode wants pulsation!
+  bode(tf, freqs*2*pi) %>% {
+    tibble(f=.$w/(2*pi), `magnitude (dB)`=.$mag, `phase (deg)`=.$phase)} %>%
+    pivot_longer(-f) %>% 
+    ggplot(aes(x=f, y=value)) +
+    geom_line() +
+    scale_x_log10(
+      minor_breaks=scales::minor_breaks_n(10), 
+      labels= ~ latex2exp::TeX(paste0("$10^{", log10(.), "}$"))) +
+    facet_wrap(~name, nrow=2, scales="free") +
+    labs(x="frequency (Hz)")
+}
+
+# FUNZIONE: Generazione segnale sinusoidale con diverse armoniche
+signal <- function(t, pars, rad = FALSE) { 
+  stopifnot(is.data.frame(pars))
+  with(pars, {
+    if (!rad) {
+      phi <- phi/180*pi
+      f <- 2*pi*f
+    }
+    map_dbl(t, \(t) sum( map_vec(seq_along(w) , \(i) w[i]*cos(t*f[i] + phi[i] ))))
+  })
+}
+```
+
+
+```{r}
+f0 <- 10
+
+# Provare con un'armonica pura
+# pars <- tibble(
+#   w = c(1),
+#   f = c(f0),  # 1 funziona
+#   phi = c(0)
+# )
+
+# Provare con tante armoniche
+pars <- tibble(
+  w = c(1, 0.1, 0.3),
+  f = c(15, 20, 45),
+  phi = c(0, 0, 0)
+)
+
+Nt <- 1000 # numero totale dei campioni
+s <- tibble(
+  t = 0:Nt * 0.001, # 1 kHz di frequenza di campionamento
+  u = signal(t, pars), 
+  un = u + rnorm(length(t), 0, pars$w[1] / 10)
+)
+```
+
+
+```{r}
+s %>% 
+  mutate(
+    f = 0:(n()-1)/max(t),
+    fft_u = fft(un),
+    intensity_u = Mod(fft_u) / n()*2,
+    phase_u = Arg(fft_u)/pi*180
+  ) %>% 
+  slice_head(n=as.integer(nrow(.)/2)) %>%
+  ggplot(aes(x=f, y=intensity_u)) +
+  geom_spoke(aes(y=0, radius=intensity_u, angle=pi/2)) +
+  geom_point()
+```
+
+```{r}
+M <- 10
+K <- 1000
+C <- 50
+
+# Frequenza naturale:
+fn <- 1/(2*pi) * sqrt(K/M)
+
+num <- c(C, K)
+den <- c(M, C, K)
+
+H <- tf(num, den)
+
+ggbodeplot(H, fmin=0.1, fmax=100) +
+  geom_vline(xintercept=c(1, sqrt(2)) * fn, color="red", linetype=2) +
+  labs(title=paste(
+    "Natural frequency:", round(fn, 2), "Hz",
+    " - Isolation: >", round(sqrt(2)*fn, 2), "Hz"))
+```
+
+```{r}
+output <- lsim(H, s$un, s$t) # simula l'uscita
+s <- s %>% 
+  mutate(
+    # Simulazione dell'uscita
+    y = output$y[1,]
+  )
+
+# Grafici
+pp <- plot_ly() %>%
+  add_lines(s$t, s$y, name = "output", line= list(color= "red")) %>%
+  add_lines(s$t, s$un, name = "input", line= list(color= "blue")) %>%
+  layout(title = "Input & Output")
+pp
+```
+
+
+
+
+*PARTE ASSEGNATA*
+
+
+
+
+Stimare il segnale in ingresso originale a partire dal segnale in uscita e dal modulo e la fase della funzione di trasferimento
+
+NOTA: impiegare funzioni che processano automaticamente tutte le armoniche che sono presenti nel segnale. In altre parole impiegare nelle funzioni che costruirete la struttura della funzione signal()
+
+Suggerimenti
+calcolare FFT
+trovare i picchi FFT
+applicare inversa di modulo e fase della funz trasferimento alle armoniche corrispondenti ai picchi del modulo della FFT
+scrivere una funzione che stima l’ingresso da generiche componenti armoniche in uscita che avrete salvato in un contenitore dati ‘picchi’ ed H(w): signal_input <- function(t, picchi, H) {}
+quando il vostro codice funziona provate ad aggiungere altre armoniche
+quando il vostro codice funziona provate ad aggiungere rumore
+
+
+
+```{r}
+#Definisci Fdt
+#num <- c(C, K)
+#den <- c(M, C, K)
+
+#H <- tf(num, den)
+
+
+
+# FUNZIONE: calcola il valore di una fdt a una certa pulsazione w data
+# w è la pulsazione in radianti
+# num e den numeratore e denominatore in ordine di esponente decrescente
+valore_H <- function(num, den, w) { 
+  sum(
+    map_vec(seq_along(num), function(n) rev(num)[n] * (1i*w)^(n-1))
+  ) /
+  sum(
+    map_vec(seq_along(den), function(n) rev(den)[n] * (1i*w)^(n-1))
+  ) 
+}
+#map_vec applica ad ogni indice di seq_along la funzione function(n) che non fa altro che valutare il termine nesimo del polinimio(den o num) nel punto jw al fine poi di sommarli tramite sum() e ottenere un output del tipo H(jw)= num(jw)/den(jw), la funzione rev() serve a invertire l ordine dei coefficienti che vengono forniti in ingresso in ordine decr ma vengono usati in ordine crescente (otp di seq_along)
+
+# FUNZIONE: Stima ingresso dalle componenti armoniche in uscita 'picchi' e H(w)
+
+signal_input <- function(t, picchi) { 
+
+  map_dbl(t, function(t)
+  sum(
+    map_vec(seq_len(nrow(picchi)), function(i)
+      picchi[i,1] / Mod(valore_H(num, den, picchi[i,2])) *
+      cos( picchi[i,2]*t + picchi[i, 3] - Arg(valore_H(num, den, picchi[i,2])) ) #funziona perchè num e den sono definiti                                                                                     #sopra in realata quindi per poterla usare
+                                                                                 # serve anche H
+    )
+  )
+)
+}
+
+#La funzione prende in ingresso un vettore di istanti temporali  che corrispondono ai picchi una matrice(tabella) chiamata picchi che per ogni riga ha le informazioni di ampiezza pulsazione e fase di una armonica,H è necesaria servono num e den per poter apllicare valore di H.
+#Per ogni istante temporale di picco vengono sommate tutte le armoniche contenute nella matrice picchi(seq_len crea gli indici per scorrere le righe) il corpo della funzione anonima Function(i) è quello che inverte il segnale grazie alla conoscenza di fdt, per ogni armonica e per ogni istante temporale di picco ripristina il valore di ampiezza del signale di ingresso (dividendo per Mod della fdt) la pulsazione del signale di ingresso rimane invariata quindi la seconda dìclonna della matrice picchi fornisci la pulsazione e la fase originale viene ripristinata conocendo la fase contenuta nella terza colonna e sottrando lo sfasamento introdotta dalla fdt calcolato con Arg(fdt), ovviamente modulo e fase della fdt vengono calcolati valutando la stessa alla pulsazione della armonica interessata
+```
+
+
+## Calcoliamo FFT ed i suoi picchi
+```{r}
+# Aggiungiamo l'FFT
+s <- s %>% 
+  mutate(
+    f = 0:(length(t)-1)/max(t),  #vettore di frequenze
+    fft_y = fft(y - mean(y)),   #applico fft al segnale(tolgo la componente continua che non mi interessa)
+    intensity_y = Mod(fft_y) / length(fft_y)*2, #calcola il modulo per ogni elemento(*2 serve per mostrare lo spettro monolato non specchiato) normalizzato
+    phase_y = Arg(fft_y)/pi*180   #calcola la fase in gradi
+  )
+
+# Trovo i primi N picchi del modulo della FFT
+N <- length(pars$f)
+picchi <- matrix(0, nrow = N, ncol = 3)  # matrice Nx3 ogni riga contiene un armonica con ampiezza pulsazione e fase
+peaks <- findpeaks(s$intensity_y[1:(length(s$intensity_y) %/% 2)], nups = 1, ndowns = 1, sortstr = TRUE)   #cerca i picchi di intensità su metà frequenze(segnale simmetrico perche reale) e li ordina in ordine crescente
+#peaks
+# Controlla che ci siano picchi previsti
+if (!is.null(peaks) && nrow(peaks) >= N) {
+  picchi_values <- peaks[1:N, 1]  # Valori dei picchi
+  picchi_indici <- peaks[1:N, 2] # Indici dei picchi nel vettore passato
+  picchi_freq <- s$f[picchi_indices]  # Frequenze corrispondenti ai picchi del segnale s
+  picchi_fasi <- s$phase_y[picchi_indices] # Fasi corrispondenti ai picchi del seganel s
+
+  # riempio la matrice usa i 3 picchi maggiori 
+  picchi[, 1] <- picchi_values
+  picchi[, 2] <- 2 * pi * picchi_freq
+  picchi[, 3] <- pi * picchi_fasi / 180
+}
+print(picchi)
+
+```
+
+```{r}
+
+# usiamo signal input, quindi ripristiniamo il segnale conoscendo modulo e sfasamento di fdt
+s <- s %>% 
+  mutate(
+    u_est = signal_input(t, picchi)
+  )
+
+pp %>%
+  add_lines(s$t, s$u_est, name = "input stimato", line= list(color= "green")) %>%
+  layout(title = "Input originario e stimato")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

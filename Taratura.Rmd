@@ -1,0 +1,320 @@
+---
+title: "Taratura"
+author: "Andrea Pasquali"
+date: "2025-08-20"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(plotly)
+library(tidyverse)
+library(signal)
+library(gsignal)
+library(control)
+library(latex2exp)
+library(ggplot2)
+library(minpack.lm)
+```
+
+
+Uso dati 2005
+
+```{r}
+Temp <- read.table("datiPT100_2005Taratura.txt", header = F, sep = "", stringsAsFactors = FALSE)%>%
+  as.data.frame() %>% 
+  rename(
+    t = V1,
+    T= V2,
+    T2= V3) %>%
+    mutate(across(c(t, T, T2), ~ as.numeric(sub(",", ".", .))))
+
+  
+  
+Temp
+```
+
+```{r}
+ggplot(Temp, aes(x=t, y=T)) +
+  geom_line()
+```
+
+
+Incogniti solo tau1 e tau2 
+
+```{r}
+Ti <- 30
+Tf <- 82
+```
+
+
+```{r}
+library(minpack.lm)
+
+data.l <- Temp %>% 
+  select(t, T) %>% 
+  mutate(t = t - 180) %>%
+  dplyr::filter(t>0, t<120) 
+
+fit <- nlsLM( T ~ Tf + (Ti - Tf)*(((tau1/(tau1-tau2))*exp(-t/tau1) - (tau2/ (tau1-tau2))*exp(-t/tau2))) , 
+    data = data.l, 
+    start = list(
+      tau1 = 30,
+      tau2 = 10),
+    control = nls.lm.control(maxiter = 200)
+    
+    )
+
+summary(fit)
+
+plot(resid(fit))
+
+coef(fit)
+```
+
+Visualizzo
+
+```{r}
+# Previsioni del modello (grafico)
+data.l <- data.l %>% mutate(predictions = predict(fit))
+
+
+
+ggplot(data.l, aes(x = t)) +
+  geom_line(aes(y = predictions), color = "blue",size = 1.5 ) +
+  geom_point(aes(y = T), color = "red", size = 0.4) +
+  labs(title = "Fit non-lineare con 2 parametri", x = "Tempo", y = "Temperatura")
+
+```
+
+
+
+
+Incogniti tau1 tau2 Ti Tf ti
+
+```{r}
+library(minpack.lm)
+
+data.l2 <- Temp %>% 
+  select(t, T) %>% dplyr::filter(t > 190, t < 300)
+#data.l2
+
+fit2 <- nlsLM(
+  T ~ Tfo + (Tio - Tfo) * (
+    (tau1/(tau1 - tau2)) * exp(-(t-ti)/tau1) -
+    (tau2/(tau1 - tau2)) * exp(-(t-ti)/tau2)
+  ),
+  data = data.l2,
+  start = list(
+    tau1 = 30,
+    tau2 = 10,
+    Tfo  = 82 ,
+    Tio  = 30,
+    ti=46
+  )
+)
+
+
+
+summary(fit2)
+
+plot(resid(fit2))
+```
+
+```{r}
+# Previsioni del modello (grafico)
+data.l2 <- data.l2 %>% mutate(predictions = predict(fit2))
+
+
+
+ggplot(data.l2, aes(x = t)) +
+  geom_line(aes(y = predictions), color = "blue",size = 1.5 ) +
+  geom_point(aes(y = T), color = "red", size = 0.4) +
+  labs(title = "Fit non-lineare con 5 parametri", x = "Tempo", y = "Temperatura")
+
+```
+
+
+
+Bootstrap
+
+```{r}
+
+library(boot)
+
+stat_fun <- function(data, indices) {
+  d <- data[indices, ]   # campione bootstrap
+  
+  fit_boot <- suppressWarnings(   # sopprime i warning
+    try(
+      nlsLM(
+        T ~ Tfo + (Tio - Tfo) * (
+          (tau1 / (tau1 - tau2)) * exp(-(t - ti) / tau1) -
+          (tau2 / (tau1 - tau2)) * exp(-(t - ti) / tau2)
+        ),
+        data = d,
+        start = list(
+          tau1 = 30,
+          tau2 = 10,
+          Tfo  = 82,
+          Tio  = 30,
+          ti   = 46
+        ),
+        control = nls.lm.control(maxiter = 300)  # <-- aumento iterazioni
+      ),
+      silent = TRUE
+    )
+  )
+  
+  if (inherits(fit_boot, "try-error")) {
+    return(rep(NA, 5))   # restituisco 5 NA, come numero di parametri
+  } else {
+    return(coef(fit_boot))
+  }
+}
+
+
+
+data.b <- boot(
+  data.l2,
+  statistic = stat_fun,
+  R = 10000
+)
+
+```
+
+```{r}
+
+cat("Indici dei coefficienti:\n")
+print(setNames(1:5, names(coef(fit2))))
+
+
+boot.ci(data.b, type = "perc", index = 1)
+boot.ci(data.b, type = "perc", index = 2)
+boot.ci(data.b, type = "perc", index = 3)
+boot.ci(data.b, type = "perc", index = 4)
+boot.ci(data.b, type = "perc", index = 5)
+```
+
+Funzione di Trasferimento
+
+la guaina introduce un ulteriore scambio termico tra il mezzo e la sonda.
+
+L’obiettivo è derivare la funzione di trasferimento tra la temperatura del mezzo da misurare e quella letta dalla sonda
+
+Modellazione del sistema:
+
+Il sistema può essere rappresentato con tre grandezze:
+
+Tm(t): temperatura del mezzo da misurare (ingresso)
+
+Tg(t): temperatura della guaina metallica
+
+Ts(t): temperatura della sonda PT100 (uscita)
+
+Ci sono due scambi termici:
+
+mezzo-guaina, coefficiente di scambio α1 e area A1
+
+guaina-sonda, ccoefficiente di scambio α2 e area A2
+
+capacità termiche:
+
+Guaina: CG = mG * cG  espressa quindi come massa della guaina per il calore specifico
+
+Sonda: CS = mS * cS  
+
+Bilancio energetico:
+
+Applico il principio di conservazione dell'energia
+
+Per la guaina:
+
+CG * dTg/dt = α1 * A1 * (Tm - Tg) - α2 * A2 * (Tg - Ts)
+
+Per la sonda:
+
+CS * dTs/dt = α2 * A2 * (Tg - Ts)
+
+Passaggio in dominio della frequenza
+
+CG * s * Tg(s) = α1 * A1 * (Tm(s) - Tg(s)) - α2 * A2 * (Tg(s) - Ts(s))
+
+CS * s * Ts(s) = α2 * A2 * (Tg(s) - Ts(s))
+
+Ottengo un sistema in forma algebrica di due equazioni che se risolto, definendo i due parametri tau1 e tau2 
+per semplicità mi permette di ricavare la Fdt
+
+tau1 = CG / (α1 * A1 + α2 * A2)   tempo caratteristica guaina
+
+tau2 = CS / (α2 * A2)    tempo caratteristico sonda
+
+Fdt tra Tm e Ts
+
+Ts(s)/Tm(s) = 1 / (tau1 * tau2 * s^2 + (tau1 + tau2) * s + 1)
+
+secondo ordine sovrasmorzato, due poli reali distinti
+
+Se l’ingresso è un gradino di temperatura la risposta nel tempo sarà:
+
+T(t) = Tf + (Ti - Tf) * [(tau1 / (tau1 - tau2)) * exp(-t / tau1) -(tau2 / (tau1 - tau2)) * exp(-t / tau2)]
+
+Che è il modello usato precentemente per la regressione e per stimare i parametri.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

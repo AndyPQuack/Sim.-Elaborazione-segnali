@@ -1,0 +1,429 @@
+---
+title: "Modulazione"
+author: "Andrea Pasquali"
+date: "2025-08-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(plotly)
+library(gsignal)
+```
+
+
+```{r}
+# FUNZIONE: Bodeplot
+ggbodeplot <- function(tf, fmin=1, fmax=1e4, df=0.01) {
+  # vector of points for each order of magnitude (OOM):
+  pts <- 10^seq(0, 1, df) %>% tail(-1)
+  # vector of OOMs:
+  ooms <- 10^(floor(log10(fmin)):ceiling(log10(fmax)-1))
+  # combine pts and ooms:
+  freqs <- as.vector(pts %o% ooms)
+  # warning: bode wants pulsation!
+  bode(tf, freqs*2*pi) %>% {
+    tibble(f=.$w/(2*pi), `magnitude (dB)`=.$mag, `phase (deg)`=.$phase)} %>%
+    pivot_longer(-f) %>% 
+    ggplot(aes(x=f, y=value)) +
+    geom_line() +
+    scale_x_log10(
+      minor_breaks=scales::minor_breaks_n(10), 
+      labels= ~ latex2exp::TeX(paste0("$10^{", log10(.), "}$"))) +
+    facet_wrap(~name, nrow=2, scales="free") +
+    labs(x="frequency (Hz)")
+}
+
+# FUNZIONE: Generazione segnale sinusoidale con diverse armoniche contenute nella tabella pars
+signal <- function(t, pars, rad = FALSE) { 
+  stopifnot(is.data.frame(pars))
+  with(pars, {
+    if (!rad) {
+      phi <- phi/180*pi
+      f <- 2*pi*f
+    }
+    map_dbl(t, \(t) sum( map_vec(seq_along(w) , \(i) w[i]*sin(t*f[i] + phi[i] ))))
+  })
+}
+```
+
+
+```{r}
+# Parametri
+fc <- 2000        # Frequenza di campionamento (Hz)
+fm <- 10          # Frequenza del segnale di misura (Hz)
+fr <- 15          # Frequenza del rumore (Hz)
+fp <- 300         # Frequenza della portante (Hz)
+m <- 0.8          # Indice di modulazione (0 < m < 1)
+duration <- 2     # Durata del segnale (secondi)
+
+
+# Vettore temporale
+# t <- seq(0, duration, by = 1/fc)
+
+# Parametri del segnale di misura
+pars_m <- tibble(
+  w = c(1, 0.5, 0.3), f = c(fm, 2*fm, 4*fm), phi = c(0, 0, 0))
+
+# Generiamo il segnale di misura:
+ym <- tibble(
+  t = seq(0, duration, by = 1/fc),
+  y = signal(t, pars_m),
+  yn = y + rnorm(length(t), 0, pars_m$w[1]/10) # rnorm(n, mean, sd)
+)
+
+# aggiunge le colonne frequenza, fft, modula e fase della trasformata
+ym <- ym %>% mutate(
+    f = 0:(length(t)-1)/max(t),
+    fft = fft(yn),
+    intensity = Mod(fft) / length(t)*2,
+    phase = Arg(fft)/pi*180
+  ) 
+
+# Grafico a barre con plot_ly:
+pp <- plot_ly() %>%
+  add_lines(data = ym, x = ~f, y = ~intensity, type = "bar", name = "Segnale", marker = list(color= "blue"))
+
+# Generiamo il rumore con il suo spettro:
+pars_r <- tibble(
+  w = c(1, 0.5, 0.8), f = c(fr, 3*fr, 9*fr), phi = c(0, 40, 90))
+r <- tibble(
+  t = seq(0, duration, by = 1/fc),
+  y = signal(t, pars_r),
+  f = 0:(length(t)-1)/max(t),
+  fft = fft(y),
+  intensity = Mod(fft) / length(t)*2,
+  phase = Arg(fft)/pi*180
+)
+
+
+pp <- pp %>%
+  add_lines(x = r$f, y = r$intensity, type = "bar", name = "Rumore", marker = list(color= "red")) 
+pp
+```
+
+
+
+
+```{r}
+# Onda portante:cos(2 * pi * fp * t)
+# Aggiungiamo alla struttura associata alla misura il segnale modulato:
+
+#modula il segnale moltiplicando per la portante e lo trasforma
+
+ym <- ym %>% mutate(
+    yn_m = (1 + m * ym$yn) * cos(2 * pi * fp * t), #(1+ m*s(t)) *p(t)
+    fft_m = fft(yn_m),
+    intensity_m = Mod(fft_m) / length(t)*2,
+    phase_m = Arg(fft_m)/pi*180
+  )
+pp <- plot_ly() %>%
+  add_bars(data = ym, x = ~f, y = ~intensity, name = "Segnale", marker = list(color = "blue")) %>%
+  add_bars(x = r$f, y = r$intensity, name = "Rumore", marker = list(color = "red")) %>%
+  add_bars(data = ym, x = ~f, y = ~intensity_m, name = "Segnale Modulato", marker = list(color = "green")) %>%
+  layout(title = "Spettro di Intensità",
+       xaxis = list(title = "Frequenza (Hz)", range = c(0, 500), showgrid = TRUE),
+       yaxis = list(title = "Intensità", showgrid = TRUE),
+       legend = list(x = 0.25, y = 0.9))
+pp
+```
+
+
+```{r}
+pp2 <- plot_ly() %>%
+  add_lines(data = ym, x = ~t, y = ~yn_m, name = "Segnale modulato", line = list(color = "blue")) 
+# %>%
+#   layout(title = "Segnale modulato", 
+#          xaxis = list(title = "Tempo (s)"), 
+#          yaxis = list(title = "Ampiezza"))
+
+  
+# simulazione dell'effetto interferente sul segnale modulato:
+ym <- ym %>% mutate(
+    yn_m_n = yn_m + r$y,
+    fft_m = fft(yn_m_n),
+    intensity_m = Mod(fft_m) / length(t)*2,
+    phase_m = Arg(fft_m)/pi*180
+  )
+
+plot_ly() %>%
+  add_lines(data = ym, x = ~f, y = ~intensity_m, type = "bar", name = "Segnale", marker = list(color= "blue")) %>%
+  layout(title = "Spettro segnale modulato affetto da rumore",
+       xaxis = list(title = "Frequenza (Hz)", range = c(0, 500), showgrid = TRUE),
+       yaxis = list(title = "Intensità", showgrid = TRUE))
+```
+
+```{r}
+pp2 <- pp2 %>%
+  add_lines(data = ym, x = ~t, y = ~yn_m_n, name = "Con effetto interferente", line = list(color = "red")) %>%
+  layout(title = "Effetto interferente", 
+         xaxis = list(title = "Tempo (s)"), 
+         yaxis = list(title = "Ampiezza"))
+pp2
+```
+
+
+*Esercizio*
+
+
+
+Estrarre il segnale in uscita originale a partire da quello affetto da rumore bianco, modulato ed affetto da rumore interfente
+
+
+Modulazione m(t) = (1 + s(t)) cos(2π fp t)
+
+
+Demodulazione
+
+m(t)*cos(2π f_p t) = (1 + s(t)) cos²(2π f_p t) = ½ (1 + s(t)) + ½ (1 + s(t)) cos(4π fp t). 
+
+Dopo il passa-basso: y(t) = ½ (1 + s(t)), e sottraendo 1 e moltiplicando *2 otteniamo solo s(t).
+
+
+
+
+Filtraggio e Demodulazione
+
+Estraiamo il segnale modulato mediante un filtro passa-alto togliendo il rumore. Di conseguenza è rimasto solo il segnale modulato che va quindi demodulato per ottenere una stima del segnale in uscita originario
+
+siccome lo ho modulato per portarlo ad alta frequenza per escludere il rumore e ottenere il segnale modulato usero un filtro passa alto
+
+
+
+```{r}
+ft <- 2 * max(pars_r$f) / fc  # Frequenza di taglio
+bf <- butter(4, ft, type = "high") #inizializzo un filtro butterworth passa alto ordine 4 tramite la funzione butter
+ym <- ym %>% 
+  mutate(
+    y_m_f = filtfilt(bf, yn_m_n) # filtfilt apllica il filtro sul set di dati con rumore e modulato che dovrò ricondurre
+  )                             # all originale inoltre non applica ritardo
+```
+
+Perchè un filtro butterworth
+
+Banda passante piatta
+
+Nella zona dove il filtro lascia passare i segnali, il guadagno rimane costante (nessuna ondulazione).
+
+Per questo si usa quando vuoi che il segnale non venga distorto in ampiezza nelle frequenze utili.
+
+Roll-off regolare
+
+Oltre la frequenza di taglio, l’attenuazione cresce gradualmente.
+
+La pendenza è circa 6 dB per ottava per ogni ordine:
+
+Ordine 1 → 6 dB/oct,
+
+Ordine 2 → 12 dB/oct,
+
+Ordine 4 → 24 dB/oct,
+
+
+
+Demodulazione
+
+m(t)*p(t)= (1+ s(t) )*p(t)*p(t)    voglio ottenere il segnale originale s(t)  siccome la portante è un coseno la moltiplicazione per 2 serve a elimanre l 1/2 che ottengo elevandolo alla seconda
+
+```{r}
+ym <- ym %>% 
+  mutate(
+    dem = 2 * y_m_f * cos(2 * pi * fp * t) - 1  
+  )
+```
+
+Passo 3: Filtraggio Passa-Basso per eliminare la componente indesiderata che si crea ad alta frequenza + ½ (1 + s(t)) cos(4π fp t)
+
+```{r}
+ft <- 2 * max(pars_m$f) / fc  # Frequenza di taglio (2 volte la massima frequenza del segnale informativo)
+bf <- butter(4, ft, type = "low") #filtro butterworth passabasso di ordine 4
+ym <- ym %>% 
+  mutate(
+    demod = filtfilt(bf, dem)
+  )
+```
+
+Confronto dei segnali:
+
+```{r}
+ym
+```
+
+
+
+```{r}
+
+
+p <- ym %>% 
+  select(t, y, yn, demod) %>%
+  pivot_longer(-t) %>% 
+  ggplot(aes(x = t, y = value, color = name, size = name)) +
+  geom_line() +
+  scale_color_manual(values = c(
+    "y"     = "green",
+    "yn"    = "red",
+    "demod" = "blue"
+  )) +
+  scale_size_manual(values = c(
+    "y"     = 0.8,  # spessore linea y
+    "yn"    = 0.3,  # spessore linea yn
+    "demod" = 1   # spessore linea demod
+  )) +
+  coord_cartesian(xlim = c(0, 0.5))
+
+ggplotly(p)
+
+
+```
+
+Alla fine del processo abbiamo ottenuto il segnale molto simile al segnale originario con una riduzione vistosa anche del rumore interferente
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

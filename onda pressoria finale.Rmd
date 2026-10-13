@@ -1,0 +1,301 @@
+---
+title: "onda pressoria finale"
+author: "Andrea Pasquali"
+date: "2025-08-19"
+output: pdf_document
+---
+```{r}
+install.packages(c("purrr", "signal", "plotly", "ggplot2", "tibble", "dplyr", "tidyr"))
+
+install.packages(c("tidyverse", "signal", "plotly"))
+```
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(purrr) #programmazione funzionale
+library(signal) #filtri digitali
+library(plotly) #visualizzazioni interattive
+library(ggplot2) 
+library(tibble) #manipolazione dati
+library(dplyr)
+library(tidyr)
+```
+
+
+fornita da prof, per confronto
+
+```{r}
+interp_fun <- function(ti, tind, tval) {
+  # Trova l'intervallo [tind[k], tind[k+1]] contenente ti
+  k <- max(which(tind <= ti & c(tind[-1], Inf) > ti))
+  
+  # Coordinate degli estremi
+  t0 <- tind[k]
+  t1 <- tind[k + 1]
+  y0 <- tval[k]
+  y1 <- tval[k + 1]
+  
+  # Interpolazione lineare
+  y <- y0 + (ti - t0) * (y1 - y0) / (t1 - t0)
+  return(y)
+}
+```
+
+
+
+
+Assegnazioni
+Scrivete in modo diverso la funzione di interpolazione [NOTA: scrivere in modo diverso la funzione può voler dire qualsiasi cosa. Se userete un approccio completamente diverso questo punto varrà parecchio, in caso modifichiate solo qualche assegnazione varrà meno]
+
+Riscrivete con reduce() la routine seguente:
+
+p_art_K <- rowSums(
+  sapply(1:K, \(k) {
+    s_sin <- sin_k(t, f_fond, k)
+    comps_sin[k] * s_sin / norm_ps(s_sin)
+  }))
+
+Usare anche i coseni per ricostruire il segnale.
+
+Trovate una frequenza di taglio opportuna.
+
+A valle del filtraggio il segnale risulta ritardato. Fate in modo di eliminare tale ritardo.
+
+Effettuare l’analisi statistica dei residui (residui := p_art_K - p_art_K_noise_filt).
+
+Effettuare l’analisi in frequenza dei residui ed estrapolare le considerazioni del caso.
+
+Scegliere una frequenza di taglio a valle dell’analisi dei residui [NOTA: al variare della frequenza di taglio vedrete che i residui cambiano. Come indicatori di tale cambiamento potrete usare: valor medio, deviazione standard, analisi della normalità, banda in frequenza, etc. Quello che si chiede è di dimostrare di aver compreso la relazione tra ft e tali indicatori e di saper indicare anche in modo non quantitativo con che criterio si può effettuare la scelta]
+
+Suggerimenti
+Per la frequenza di taglio finale notare il fatto che il rumore aggiunto (e poi da ridurre tramite filtro) è gaussiano. Ripensate anche all’approssimazione tramite Fourier eseguita.
+Per eliminare il ritardo potete usare funzioni diverse da filter (o anche, meglio, filter stessa con una serie di comandi)
+
+Riscrivo interpolazione
+
+```{r}
+interp_alt <- function(tind, tval, n = 500, method = "monoH.FC") {  #n è il numero di punti da genrare
+  # Controlli di base
+  if (length(tind) != length(tval)) {
+    stop("tind e tval devono avere la stessa lunghezza")
+  }
+  if (length(tind) < 2) {
+    stop("Servono almeno due punti per l'interpolazione")
+  }
+  
+  # Crea la funzione di interpolazione( data un ascissa genera l ordinata interpolata)
+  f_interp <- splinefun(tind, tval, method = method)
+  
+  # Genera n istanti da interpolare
+  ti <- seq(min(tind), max(tind), length.out = n)
+  
+  # Calcola n valori interpolati usando la funzione 
+  wave <- f_interp(ti)
+
+  return(wave)
+}
+```
+
+
+```{r}
+t <- seq(0, 1, 0.001)
+tind  <- c(0, 0.1, 0.2, 0.3, 0.5, 1)   # tempi critici
+tval  <- c(80, 120, 100, 105, 90, 80)  # valori ai tempi critici
+
+
+onda1 <- sapply(t[1:(length(t)-1)], interp_fun, tind = tind, tval = tval)
+ 
+onda1 <- rep(onda1, 10)
+t <- t[1:length(t)-1]
+
+
+
+
+
+
+p_art <- interp_alt(tind, tval, n=1000) 
+p_art <- rep(p_art, 10)
+valori <- data.frame(pressure = p_art, time = seq(0,10 - 0.001, 0.001), onda1=onda1)
+valori
+
+
+
+
+
+g <- ggplot(valori, aes(x = time)) +
+  geom_line(aes(y = pressure), color = "blue") +
+  geom_line(aes(y = onda1), color = "red")
+
+
+ggplotly(g)
+```
+
+Uso reduce, utilizzando solo il seno
+
+in pratica per ogni armonica reduce riempie il vettore acc generato in .init con il contributo di ogni componente normalizzato per ogni istante di tempo visto che viene inizializzato come un vettore di tutti zeri di lunghezza come t
+
+p_art_K <- reduce(1:K, .init = rep(0, length(t)), .f = function(acc, k) {
+  s_sin <- sin_k(t, f_fond, k)
+  acc + comps_sin[k] * s_sin / norm_ps(s_sin) # normalizzo
+})
+
+
+
+Ricostruisco segnale usando anche il coseno
+
+```{r}
+#funzioni implementate dal prof
+`%ps%` <- function(A, B) mean(A * B) #prodotto scalare medio
+norm_ps <- function(A) sqrt(A %ps% A) #norma vettore
+
+sin_k <- function(t, f, k=1) sin(2*pi*f*k*t) #seno alla k-esima armonica
+cos_k <- function(t, f, k=1) cos(2*pi*f*k*t) #coseno alla k-esima armonica
+
+K <- 40 #numero armoniche
+f_fond <- 1 / t[length(t)-1] 
+
+#calcolo componenti, per ogni armonica facendo il prodotto scalare valuta quanto è presente all' interno del segnale
+comps_sin <- map_dbl(1:K, \(k) {
+  s <- sin_k(t, f_fond, k)
+  (p_art - mean(p_art)) %ps% s / norm_ps(s)
+})
+
+comps_cos <- map_dbl(1:K, \(k) {
+  c <- cos_k(t, f_fond, k)
+  (p_art - mean(p_art)) %ps% c / norm_ps(c)
+})
+
+#ricostruzione del segnale con seno e coseno
+p_art_app <- reduce(1:K, .init = rep(0, length(t)), .f = function(acc, k) {
+  s <- sin_k(t, f_fond, k)
+  c <- cos_k(t, f_fond, k)
+  acc + comps_sin[k] * s / norm_ps(s) + comps_cos[k] * c / norm_ps(c)
+}) + mean(p_art)
+
+p_art_app <- rep(p_art_app,10)
+
+valori <- valori %>% mutate( Fourier = p_art_app)
+valori
+
+g <- ggplot(valori, aes(x = time)) +
+  geom_line(aes(y = pressure), color = "blue") +
+  geom_line(aes(y = onda1), color = "red") +
+  geom_line(aes(y = Fourier), color = "magenta")
+
+ggplotly(g)
+
+
+```
+
+Aggiungo rumore usando rnorm
+
+```{r}
+set.seed(0)
+p_art_K_R <- p_art_app + rnorm(length(p_art_app), 0, 3)
+
+valori <- valori %>% mutate(noise = p_art_K_R)
+valori
+g <- ggplot(valori, aes(x = time)) +
+  geom_line(aes(y = pressure), color = "blue") +
+  geom_line(aes(y = onda1), color = "red") +
+  geom_line(aes(y = Fourier), color = "magenta") +
+  geom_line(aes(y = noise), color = "green")
+  
+
+ggplotly(g)
+```
+
+
+
+
+Filtro Butterworth e Rimozione Ritardo (calcolo frequenze di Nyquist fc/2, costruisco filtro Butterworth digitale(plane=z) di ordine 3 applico il filtro in modo zero-phase con filtfilt, che filtra il segnale prima avanti e indietro nel tempo per annullare il ritardo temporale indotto dal filtro)
+
+```{r}
+fc <- 1 / (t[2] - t[1]) #frequenza campionamento
+fn <- fc / 2 #frequenza di Nyquist
+ft <- 120 #frequenza di taglio del filtro
+ord <- 2
+
+flt <- butter(ord, W = ft / fn, plane = "z") #W normalizza rispetto alla frequenza di nyquist
+p_art_K_noise_filt <- filtfilt(flt, p_art_K_R)#rimuovo ritardo (filtro applicato avanti e indietro quindi zero fase usando filtfilt)
+valori <- valori %>% mutate(Filtered = p_art_K_noise_filt)
+
+g <- ggplot(valori, aes(x = time)) +
+  geom_line(aes(y = pressure), color = "blue") +
+  geom_line(aes(y = onda1), color = "red") +
+  geom_line(aes(y = Fourier), color = "magenta") +
+  geom_line(aes(y = noise), color = "green") +
+  geom_line(aes(y = Filtered), color = "orange")+
+  xlim(0.5, 9)
+
+ggplotly(g)
+```
+
+
+Analisi Statistica dei Residui (calcolo residuo: differenza tra segnale ideale(ricostruito senza rumore) e segnale filtrato, calcolo media e deviazione standard dei residui per capire se il filtraggio ha introdotto bias o errore significativo, eseguo test di normalità di Shapiro Wilk per veddere se residui seguono una distribuzione normale) (aggiunto if per assicurarsi che io abbia non più di 5000 punti nel vettore residui)
+
+```{r}
+residui <- p_art_app - p_art_K_noise_filt #differenza segnale ideale e segnale filtrato
+
+mean(residui) #media residuo
+sd(residui) #deviazione standard residuo
+#se ho più di 5000 punti ne campiono 5000 (casuali)
+if (length(residui) > 5000) {
+  #set.seed(123)
+  residui_sample <- sample(residui, 5000)
+} else {
+  residui_sample <- residui
+}
+#shapiro.test(residui_sample) test di normalità troppo sensibile per campione troppo grande risulta errato
+
+# QQ-plot dei residui
+qqnorm(residui_sample, main = "QQ-plot dei residui")
+qqline(residui_sample, col = "red", lwd = 2)
+
+```
+
+Analisi Spettrale dei Residui (calcolo trasformata di fourier dei residui per analizzare le componenti frequienziali dell'errore residuo, traccio modulo della FTT fino a Nyquist per vedere a quali frequenze il filtro potrebbe aver introdotto errori maggiori)
+
+```{r}
+res_fft <- abs(fft(residui)) # abs mi serve per il modulo
+freqs <- seq(0, fc/2, length.out = length(res_fft)/2) #fino a nyquist perche poi specchiato
+
+plot(freqs, res_fft[1:(length(res_fft)/2)], type = "l",
+     xlab = "Hz", ylab = "Ampiezza")
+```
+
+
+
+Analisi Residui vs Frequenza di Taglio (studio come cambia la qualità del filtraggio al variare della frequenza di taglio del filtro Butterworth. .Il filtro Butterworth con una frequenza di taglio più bassa taglia più rumore ad alta frequenza ma rischia di deformare il segnale originale (introducendo bias e maggiori residui). Con una frequenza di taglio più alta, il filtro lascia passare più rumore ma preserva meglio il segnale originale
+
+```{r}
+fts <- seq(10, 500, by = 10) #sequenza di frequenze di taglio fts da 10 a 200Hz con step 10
+res_stats <- map_dfr(fts, function(ft) {   #sta per dataframe restituisce tabelle
+  flt <- butter(ord, W = ft / fn, plane = "z")
+  p_filt <- filtfilt(flt, p_art_K_R)
+  residui <- p_art_app - p_filt
+  tibble(
+    ft = ft,
+    mean_resid = mean(residui),
+    sd_resid = sd(residui),
+    max_resid = max(abs(residui))
+  )
+})
+
+
+ggplot(res_stats, aes(x = ft)) +
+  geom_line(aes(y = sd_resid, color = "Deviazione standard")) +
+  geom_line(aes(y = max_resid, color = "Massimo residuo")) +
+  geom_line(aes(y = mean_resid, color = "media")) +
+  scale_color_manual(name = "Legenda", values = c("Deviazione standard" = "blue", "Massimo residuo" = "red", "media"="green")) +
+  labs(title = "Analisi Residui vs Frequenza di Taglio",
+       y = "Residui", x = "Frequenza di taglio (Hz)")
+
+```
+Devo scegliere il valore migliore per cui mean è circa 0 sd è piccola e il massimo residuo non sia troppo elevato
+
+
+
+
